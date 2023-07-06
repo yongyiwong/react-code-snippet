@@ -1,0 +1,246 @@
+trigger:
+  branches:
+    include:
+      - client-dev
+      - staging
+      - master
+
+pool:
+  name: Azure Pipelines
+  vmImage: 'ubuntu-latest'
+
+variables:
+  isDev: $[eq(variables['Build.SourceBranch'], 'refs/heads/development')]
+  isClientDev: $[eq(variables['Build.SourceBranch'], 'refs/heads/client-dev')]
+  isStaging: $[eq(variables['Build.SourceBranch'], 'refs/heads/staging')]
+  isProd: $[eq(variables['Build.SourceBranch'], 'refs/heads/master')]
+  YARN_CACHE_FOLDER: $(Pipeline.Workspace)/.yarn
+
+stages:
+- stage: ClientDev
+  displayName: Build and Deploy to Client Dev
+  condition: eq(variables.isClientDev, 'true')
+  variables:
+  - group: 'dev'  
+  jobs:
+#    - job: Test
+#      steps:
+#      - task: NodeTool@0
+#        inputs:
+#          versionSpec: '16.13.1'
+#      - task: Cache@2
+#        displayName: Cache Yarn packages
+#        inputs:
+#          key: 'yarn | "$(Agent.OS)" | yarn.lock'
+#          restoreKeys: |
+#            yarn | "$(Agent.OS)"
+#            yarn
+#          path: $(YARN_CACHE_FOLDER)
+#      - script: |
+#          yarn install
+#          set CI=true && yarn test --passWithNoTests
+    - job: Build
+      steps:
+      - task: Cache@2
+        displayName: Cache Yarn packages
+        inputs:
+          key: 'yarn | "$(Agent.OS)" | yarn.lock'
+          restoreKeys: |
+            yarn | "$(Agent.OS)"
+            yarn
+          path: $(YARN_CACHE_FOLDER)
+      - task: NodeTool@0
+        inputs:
+          versionSpec: '16.13.1'
+      - script: |
+          touch .env;
+          echo "REACT_APP_FE_BASE_URL=$(REACT_APP_FE_BASE_URL)" >> .env;
+          echo "REACT_APP_AZURE_B2C_TENANT=$(REACT_APP_AZURE_B2C_TENANT)" >> .env;
+          echo "REACT_APP_AZURE_B2C_CLIENT_ID=$(REACT_APP_AZURE_B2C_CLIENT_ID)" >> .env;
+          yarn install
+          yarn build
+        displayName: Build project
+      - task: AzureCLI@1
+        displayName: Az file copy to storage and update blob properties
+        inputs:
+          azureSubscription: sc_My_VRC_Development
+          scriptLocation: inlineScript
+          inlineScript: |
+            az storage blob upload-batch \
+              --destination \$web \
+              --account-name "$(AZURE_WEB_STORAGE_NAME)" \
+              --source "$(Build.SourcesDirectory)/build" \
+              --overwrite
+            az storage blob service-properties update \
+              --account-name "$(AZURE_WEB_STORAGE_NAME)" \
+              --static-website \
+              --index-document "index.html" \
+              --404-document "index.html"
+      - task: AzureCLI@1
+        displayName: Az remove CDN rules
+        inputs:
+          azureSubscription: sc_My_VRC_Development
+          scriptLocation: inlineScript
+          inlineScript: |
+            az cdn endpoint rule remove \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --rule-name "RewriteSpaRoutes"
+            az cdn endpoint rule remove \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --rule-name "HttpToHttps"
+      - task: AzureCLI@1
+        displayName: Az add CDN rules
+        inputs:
+          azureSubscription: sc_My_VRC_Development
+          scriptLocation: inlineScript
+          inlineScript: |
+            az cdn endpoint rule add \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --order 1 \
+              --rule-name "HttpToHttps" \
+              --match-variable "RequestScheme" --operator "Equal" --match-values "HTTP" \
+              --action-name "UrlRedirect" --redirect-protocol "Https" --redirect-type "Moved"
+            az cdn endpoint rule add \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --order 2 \
+              --rule-name "RewriteSpaRoutes" \
+              --match-variable "UrlFileExtension" --operator "LessThan" --match-values "1" \
+              --action-name "UrlRewrite" --source-pattern "/" --destination "/index.html" --preserve-unmatched-path "false"
+      - task: AzureCLI@1
+        displayName: Az purge CDN
+        inputs:
+          azureSubscription: sc_My_VRC_Development
+          scriptLocation: inlineScript
+          inlineScript: |
+            az cdn endpoint purge \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --content-paths "/*"
+      - task: AzureCLI@1
+        displayName: Az update Function App CORS
+        inputs:
+          azureSubscription: sc_My_VRC_Development
+          scriptLocation: inlineScript
+          inlineScript: |
+            az functionapp cors add \
+              --name "$(AZURE_FUNCTION_APP_NAME)" \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --allowed-origins "$(REACT_APP_FE_BASE_URL)"
+
+- stage: Staging
+  displayName: Build and Deploy to Staging (Test)
+  condition: eq(variables.isStaging, 'true')
+  variables:
+  - group: 'stg'  
+  jobs:
+#    - job: Test
+#      steps:
+#      - task: NodeTool@0
+#        inputs:
+#          versionSpec: '16.13.1'
+#      - task: Cache@2
+#        displayName: Cache Yarn packages
+#        inputs:
+#          key: 'yarn | "$(Agent.OS)" | yarn.lock'
+#          restoreKeys: |
+#            yarn | "$(Agent.OS)"
+#            yarn
+#          path: $(YARN_CACHE_FOLDER)
+#      - script: |
+#          yarn install
+#          set CI=true && yarn test --passWithNoTests
+    - job: Build
+      steps:
+      - task: Cache@2
+        displayName: Cache Yarn packages
+        inputs:
+          key: 'yarn | "$(Agent.OS)" | yarn.lock'
+          restoreKeys: |
+            yarn | "$(Agent.OS)"
+            yarn
+          path: $(YARN_CACHE_FOLDER)
+      - task: NodeTool@0
+        inputs:
+          versionSpec: '16.13.1'
+      - script: |
+          touch .env;
+          echo "REACT_APP_FE_BASE_URL=$(REACT_APP_FE_BASE_URL)" >> .env;
+          echo "REACT_APP_AZURE_B2C_TENANT=$(REACT_APP_AZURE_B2C_TENANT)" >> .env;
+          echo "REACT_APP_AZURE_B2C_CLIENT_ID=$(REACT_APP_AZURE_B2C_CLIENT_ID)" >> .env;
+          yarn install
+          yarn build
+        displayName: Build project
+      - task: AzureCLI@1
+        displayName: Az file copy to storage and update blob properties
+        inputs:
+          azureSubscription: sc_My_VRC_Test
+          scriptLocation: inlineScript
+          inlineScript: |
+            az storage blob upload-batch \
+              --destination \$web \
+              --account-name "$(AZURE_WEB_STORAGE_NAME)" \
+              --source "$(Build.SourcesDirectory)/build" \
+              --overwrite
+            az storage blob service-properties update \
+              --account-name "$(AZURE_WEB_STORAGE_NAME)" \
+              --static-website \
+              --index-document "index.html" \
+              --404-document "index.html"
+      - task: AzureCLI@1
+        displayName: Az remove CDN rules
+        inputs:
+          azureSubscription: sc_My_VRC_Test
+          scriptLocation: inlineScript
+          inlineScript: |
+            az cdn endpoint rule remove \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --rule-name "RewriteSpaRoutes"
+            az cdn endpoint rule remove \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --rule-name "HttpToHttps"
+      - task: AzureCLI@1
+        displayName: Az add CDN rules
+        inputs:
+          azureSubscription: sc_My_VRC_Test
+          scriptLocation: inlineScript
+          inlineScript: |
+            az cdn endpoint rule add \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --order 1 \
+              --rule-name "HttpToHttps" \
+              --match-variable "RequestScheme" --operator "Equal" --match-values "HTTP" \
+              --action-name "UrlRedirect" --redirect-protocol "Https" --redirect-type "Moved"
+            az cdn endpoint rule add \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --order 2 \
+              --rule-name "RewriteSpaRoutes" \
+              --match-variable "UrlFileExtension" --operator "LessThan" --match-values "1" \
+              --action-name "UrlRewrite" --source-pattern "/" --destination "/index.html" --preserve-unmatched-path "false"
+      - task: AzureCLI@1
+        displayName: Az purge CDN
+        inputs:
+          azureSubscription: sc_My_VRC_Test
+          scriptLocation: inlineScript
+          inlineScript: |
+            az cdn endpoint purge \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --profile-name "$(AZURE_CDN_PROFILE)" --name "$(AZURE_CDN_ENDPOINT)" \
+              --content-paths "/*"
+      - task: AzureCLI@1
+        displayName: Az update Function App CORS
+        inputs:
+          azureSubscription: sc_My_VRC_Test
+          scriptLocation: inlineScript
+          inlineScript: |
+            az functionapp cors add \
+              --name "$(AZURE_FUNCTION_APP_NAME)" \
+              --resource-group "$(AZURE_RESOURCE_GROUP)" \
+              --allowed-origins "$(REACT_APP_FE_BASE_URL)"
